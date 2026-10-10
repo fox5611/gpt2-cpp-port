@@ -159,3 +159,21 @@ Tensor attention_scores(Tensor& q, Tensor& k, int h) {
 
     return scores;
 }
+Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
+    int n        = weights.shape[0];
+    int head_dim = v.shape[2];
+
+    Tensor out({n, head_dim});
+
+    for (int i = 0; i < n; i++) {
+        for (int d = 0; d < head_dim; d++) {
+            float sum = 0.0f;
+            for (int j = 0; j < n; j++) {
+                sum += weights.at(i, j) * v.at(h, j, d);
+            }
+            out.at(i, d) = sum;
+        }
+    }
+
+    return out;
+}
