@@ -140,3 +140,22 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
         }
     }
 }
+Tensor attention_scores(Tensor& q, Tensor& k, int h) {
+    int n        = q.shape[1];   // sequence length
+    int head_dim = q.shape[2];   // 64
+
+    Tensor scores({n, n});
+    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            float dot = 0.0f;
+            for (int d = 0; d < head_dim; d++) {
+                dot += q.at(h, i, d) * k.at(h, j, d);
+            }
+            scores.at(i, j) = (j > i) ? -1e9f : dot * scale;
+        }
+    }
+
+    return scores;
+}
