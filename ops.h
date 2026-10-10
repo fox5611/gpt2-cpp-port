@@ -128,3 +128,15 @@ Tensor split_heads(Tensor& x, int n_heads = 12) {
     }
     return out;
 }
+void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
+    int n = qkv.shape[0];      // sequence length
+    int d = q.shape[1];        // 768 — width of one wing
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < d; j++) {
+            q.at(i, j) = qkv.at(i,         j);
+            k.at(i, j) = qkv.at(i,     d + j);
+            v.at(i, j) = qkv.at(i, 2 * d + j);
+        }
+    }
+}
