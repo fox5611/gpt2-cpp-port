@@ -177,3 +177,17 @@ Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
 
     return out;
 }
+Tensor combine_heads(Tensor& x) {
+    int n_heads  = x.shape[0];
+    int n        = x.shape[1];
+    int head_dim = x.shape[2];
+
+    Tensor out({n, n_heads * head_dim});
+
+    for (int h = 0; h < n_heads; h++)
+        for (int t = 0; t < n; t++)
+            for (int d = 0; d < head_dim; d++)
+                out.at(t, h * head_dim + d) = x.at(h, t, d);
+
+    return out;
+}
