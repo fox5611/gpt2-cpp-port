@@ -1,3 +1,4 @@
 *.bin
 test_tensor
 test_*
+!test_*.cpp
