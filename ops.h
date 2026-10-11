@@ -191,3 +191,45 @@ Tensor combine_heads(Tensor& x) {
 
     return out;
 }
+Tensor attention(Tensor& x,
+                 Tensor& c_attn_w, Tensor& c_attn_b,
+                 Tensor& c_proj_w, Tensor& c_proj_b,
+                 int n_heads = 12) {
+    int n        = x.shape[0];
+    int d_model  = x.shape[1];          // 768
+    int head_dim = d_model / n_heads;   // 64
+
+    // 1. QKV projection
+    Tensor qkv = matmul(x, c_attn_w);   // (n, 2304)
+    add_bias(qkv, c_attn_b);
+
+    // 2. slice into Q, K, V
+    Tensor q({n, d_model}), k({n, d_model}), v({n, d_model});
+    split_qkv(qkv, q, k, v);
+
+    // 3. split each into heads
+    Tensor qh = split_heads(q, n_heads);   // (12, n, 64)
+    Tensor kh = split_heads(k, n_heads);
+    Tensor vh = split_heads(v, n_heads);
+
+    // 4. one head at a time
+    Tensor heads({n_heads, n, head_dim});
+    for (int h = 0; h < n_heads; h++) {
+        Tensor scores  = attention_scores(qh, kh, h);
+        Tensor weights = softmax(scores);
+        Tensor out_h   = attention_gather(weights, vh, h);
+
+        for (int i = 0; i < n; i++)
+            for (int d = 0; d < head_dim; d++)
+                heads.at(h, i, d) = out_h.at(i, d);
+    }
+
+    // 5. recombine
+    Tensor combined = combine_heads(heads);   // (n, 768)
+
+    // 6. output projection
+    Tensor out = matmul(combined, c_proj_w);  // (n, 768)
+    add_bias(out, c_proj_b);
+
+    return out;
+}
