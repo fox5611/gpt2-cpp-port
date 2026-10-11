@@ -200,9 +200,8 @@ Tensor attention(Tensor& x,
     int head_dim = d_model / n_heads;   // 64
 
     // 1. QKV projection
-    Tensor qkv = matmul(x, c_attn_w);   // (n, 2304)
-    add_bias(qkv, c_attn_b);
-
+    Tensor qkv_raw = matmul(x, c_attn_w);
+    Tensor qkv     = add_bias(qkv_raw, c_attn_b);
     // 2. slice into Q, K, V
     Tensor q({n, d_model}), k({n, d_model}), v({n, d_model});
     split_qkv(qkv, q, k, v);
@@ -228,8 +227,7 @@ Tensor attention(Tensor& x,
     Tensor combined = combine_heads(heads);   // (n, 768)
 
     // 6. output projection
-    Tensor out = matmul(combined, c_proj_w);  // (n, 768)
-    add_bias(out, c_proj_b);
-
+    Tensor proj = matmul(combined, c_proj_w);
+    Tensor out  = add_bias(proj, c_proj_b);
     return out;
 }
