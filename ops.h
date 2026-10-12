@@ -304,3 +304,18 @@ Tensor attention(Tensor& x,
 
     return logits;
 }
+[[nodiscard]] std::vector<int> generate(std::vector<int> token_ids,
+                                        std::map<std::string, Tensor>& W,
+                                        int n_new) {
+    for (int step = 0; step < n_new; step++) {
+        Tensor logits = gpt2_forward(token_ids, W);
+
+        int last = (int)token_ids.size() - 1;
+        int best = 0;
+        for (int v = 1; v < logits.shape[1]; v++)
+            if (logits.at(last, v) > logits.at(last, best)) best = v;
+
+        token_ids.push_back(best);
+    }
+    return token_ids;
+}
