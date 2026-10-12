@@ -1,6 +1,9 @@
-*.bin
-test_tensor
+dbg_*.txt
+print_keys
+crosscheck_*
+!crosscheck_*.cpp
+!crosscheck_*.py
+!crosscheck_*.py
 test_*
 !test_*.cpp
-dbg_*.txt
-crosscheck_*
+*.bin
