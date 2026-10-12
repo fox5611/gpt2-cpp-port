@@ -262,3 +262,45 @@ Tensor attention(Tensor& x,
 
     return x2;
 }
+[[nodiscard]] Tensor gpt2_forward(std::vector<int>& token_ids,
+                                  std::map<std::string, Tensor>& W,
+                                  int n_layers = 12) {
+    Tensor& wte = W.at("transformer.wte.weight");   // (50257, 768)
+    Tensor& wpe = W.at("transformer.wpe.weight");   // (1024, 768)
+
+    int n       = (int)token_ids.size();
+    int d_model = wte.shape[1];
+    int vocab   = wte.shape[0];
+
+    // embeddings: token meaning + position
+    Tensor x({n, d_model});
+    for (int t = 0; t < n; t++)
+        for (int j = 0; j < d_model; j++)
+            x.at(t, j) = wte.at(token_ids[t], j) + wpe.at(t, j);
+
+    for (int i = 0; i < n_layers; i++) {
+        std::string p = "transformer.h." + std::to_string(i) + ".";
+        x = transformer_block(x,
+            W.at(p + "ln_1.weight"),        W.at(p + "ln_1.bias"),
+            W.at(p + "attn.c_attn.weight"), W.at(p + "attn.c_attn.bias"),
+            W.at(p + "attn.c_proj.weight"), W.at(p + "attn.c_proj.bias"),
+            W.at(p + "ln_2.weight"),        W.at(p + "ln_2.bias"),
+            W.at(p + "mlp.c_fc.weight"),    W.at(p + "mlp.c_fc.bias"),
+            W.at(p + "mlp.c_proj.weight"),  W.at(p + "mlp.c_proj.bias"));
+    }
+
+    Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
+                             W.at("transformer.ln_f.bias"));
+
+    // tied output head: logits = xf @ wte.T, no transpose materialized
+    Tensor logits({n, vocab});
+    for (int t = 0; t < n; t++)
+        for (int vq = 0; vq < vocab; vq++) {
+            float s = 0.0f;
+            for (int j = 0; j < d_model; j++)
+                s += xf.at(t, j) * wte.at(vq, j);
+            logits.at(t, vq) = s;
+        }
+
+    return logits;
+}

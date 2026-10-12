@@ -3,3 +3,4 @@ test_tensor
 test_*
 !test_*.cpp
 dbg_*.txt
+crosscheck_*
