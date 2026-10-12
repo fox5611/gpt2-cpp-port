@@ -231,3 +231,15 @@ Tensor attention(Tensor& x,
     Tensor out  = add_bias(proj, c_proj_b);
     return out;
 }
+
+[[nodiscard]] Tensor mlp(Tensor& x,
+                         Tensor& c_fc_w, Tensor& c_fc_b,
+                         Tensor& c_proj_w, Tensor& c_proj_b) {
+    Tensor h_raw = matmul(x, c_fc_w);        // (n, 768) @ (768, 3072) -> (n, 3072)
+    Tensor h     = add_bias(h_raw, c_fc_b);
+    Tensor a     = gelu(h);
+    Tensor p     = matmul(a, c_proj_w);      // (n, 3072) @ (3072, 768) -> (n, 768)
+    Tensor out   = add_bias(p, c_proj_b);
+    return out;
+}
+
