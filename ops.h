@@ -243,3 +243,22 @@ Tensor attention(Tensor& x,
     return out;
 }
 
+[[nodiscard]] Tensor transformer_block(
+        Tensor& x,
+        Tensor& ln_1_w, Tensor& ln_1_b,
+        Tensor& c_attn_w, Tensor& c_attn_b,
+        Tensor& c_proj_w, Tensor& c_proj_b,
+        Tensor& ln_2_w, Tensor& ln_2_b,
+        Tensor& c_fc_w, Tensor& c_fc_b,
+        Tensor& mlp_c_proj_w, Tensor& mlp_c_proj_b) {
+
+    Tensor n1 = layernorm(x, ln_1_w, ln_1_b);
+    Tensor a  = attention(n1, c_attn_w, c_attn_b, c_proj_w, c_proj_b);
+    Tensor x1 = add(x, a);                      // residual 1
+
+    Tensor n2 = layernorm(x1, ln_2_w, ln_2_b);
+    Tensor m  = mlp(n2, c_fc_w, c_fc_b, mlp_c_proj_w, mlp_c_proj_b);
+    Tensor x2 = add(x1, m);                     // residual 2
+
+    return x2;
+}
