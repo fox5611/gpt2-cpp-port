@@ -2,10 +2,11 @@
 #include <vector>
 #include "tensor.h"
 #include "loader.h"
+#include "paths.h"
 #include "ops.h"
 
 int main() {
-    auto W = load_weights("/home/rthacker/ai/gpt2-from-scratch/gpt2_weights.bin");
+    auto W = load_weights(default_weights_path());
     std::vector<int> prompt = {464, 3139, 286, 4881, 318};
 
     std::vector<int> out = generate(prompt, W, 10);

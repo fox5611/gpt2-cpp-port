@@ -4,15 +4,16 @@
 #include <vector>
 #include "tensor.h"
 #include "loader.h"
+#include "paths.h"
 #include "ops.h"
 
 int main() {
-    auto W = load_weights("/home/rthacker/ai/gpt2-from-scratch/gpt2_weights.bin");
+    auto W = load_weights(default_weights_path());
     std::vector<int> token_ids = {464, 3139, 286, 4881, 318};
 
     Tensor logits = gpt2_forward(token_ids, W);
 
-    std::ofstream f("/home/rthacker/ai/gpt2-cpp-port/dbg_logits.txt");
+    std::ofstream f("dbg_logits.txt");
     f << std::fixed << std::setprecision(6);
     for (int i = 0; i < logits.shape[0]; i++)
         for (int j = 0; j < logits.shape[1]; j++) f << logits.at(i, j) << "\n";

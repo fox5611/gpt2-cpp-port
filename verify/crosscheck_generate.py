@@ -1,3 +1,5 @@
+import os
+BASE = os.environ.get('GPT2_CPP_DIR', '../gpt2-cpp-port/')
 from load_weights import load_weights
 from model import gpt2_forward
 

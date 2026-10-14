@@ -1,3 +1,5 @@
+import os
+BASE = os.environ.get('GPT2_CPP_DIR', '../gpt2-cpp-port/')
 import numpy as np
 from load_weights import load_weights
 from model import gpt2_forward
@@ -6,7 +8,7 @@ W = load_weights('gpt2_weights.bin')
 token_ids = [464, 3139, 286, 4881, 318]
 
 py = gpt2_forward(token_ids, W)
-cpp = np.loadtxt('/home/rthacker/ai/gpt2-cpp-port/dbg_logits.txt',
+cpp = np.loadtxt(BASE + 'dbg_logits.txt',
                  dtype=np.float32).reshape(py.shape)
 
 d = np.abs(cpp - np.asarray(py, dtype=np.float32))

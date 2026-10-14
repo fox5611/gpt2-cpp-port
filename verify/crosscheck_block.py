@@ -1,3 +1,5 @@
+import os
+BASE = os.environ.get('GPT2_CPP_DIR', '../gpt2-cpp-port/')
 import numpy as np
 from load_weights import load_weights
 from model import transformer_block
@@ -17,7 +19,7 @@ py = transformer_block(x,
         W[P + 'mlp.c_fc.weight'],    W[P + 'mlp.c_fc.bias'],
         W[P + 'mlp.c_proj.weight'],  W[P + 'mlp.c_proj.bias'])
 
-cpp = np.loadtxt('/home/rthacker/ai/gpt2-cpp-port/dbg_block.txt',
+cpp = np.loadtxt(BASE + 'dbg_block.txt',
                  dtype=np.float32).reshape(py.shape)
 d = np.abs(cpp - np.asarray(py, dtype=np.float32))
 print(f"block max diff {d.max():.8f}")

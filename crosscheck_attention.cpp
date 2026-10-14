@@ -3,6 +3,7 @@
 #include <fstream>
 #include "tensor.h"
 #include "loader.h"
+#include "paths.h"
 #include "ops.h"
 
 void dump2(const std::string& path, Tensor& t) {
@@ -20,7 +21,7 @@ void dump3head(const std::string& path, Tensor& t, int h) {
 }
 
 int main() {
-    auto W = load_weights("/home/rthacker/ai/gpt2-from-scratch/gpt2_weights.bin");
+    auto W = load_weights(default_weights_path());
     int n = 4, d_model = 768, n_heads = 12, head_dim = 64;
 
     Tensor x({n, d_model});
@@ -33,7 +34,7 @@ int main() {
     Tensor& c_proj_w = W.at("transformer.h.0.attn.c_proj.weight");
     Tensor& c_proj_b = W.at("transformer.h.0.attn.c_proj.bias");
 
-    std::string D = "/home/rthacker/ai/gpt2-cpp-port/dbg_";
+    std::string D = "dbg_";
 
     Tensor qkv_raw = matmul(x, c_attn_w);
     Tensor qkv     = add_bias(qkv_raw, c_attn_b);

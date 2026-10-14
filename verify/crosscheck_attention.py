@@ -1,9 +1,10 @@
+import os
+BASE = os.environ.get('GPT2_CPP_DIR', '../gpt2-cpp-port/')
 import numpy as np
 from load_weights import load_weights
-from model import qkv_projection, split_heads, attention_scores, causal_mask, softmax
-from model import attention as py_attention
-outfn = py_attention(x, caw, cab, cpw, cpb)
-cmp('out_fn', outfn, 'outfn.txt')
+from model import (qkv_projection, split_heads, attention_scores,
+                   causal_mask, softmax, attention)
+
 W = load_weights('gpt2_weights.bin')
 n, d_model, n_heads, head_dim = 4, 768, 12, 64
 
@@ -15,12 +16,14 @@ cab = W['transformer.h.0.attn.c_attn.bias']
 cpw = W['transformer.h.0.attn.c_proj.weight']
 cpb = W['transformer.h.0.attn.c_proj.bias']
 
-D = '/home/rthacker/ai/gpt2-cpp-port/dbg_'
+D = BASE + 'dbg_'
 
 def cmp(name, py, fname):
+    py = np.asarray(py, dtype=np.float32)
     cpp = np.loadtxt(D + fname, dtype=np.float32).reshape(py.shape)
-    d = np.abs(cpp - np.asarray(py, dtype=np.float32))
-    print(f"{name:10s} max diff {d.max():.8f}")
+    diff = np.abs(cpp - py)
+    scale = np.abs(py).max()
+    print(f"{name:10s} max diff {diff.max():.8f}   abs max {scale:12.4f}   relative {diff.max()/scale:.2e}")
 
 qkv = x @ caw + cab
 cmp('qkv', qkv, 'qkv.txt')
@@ -45,3 +48,6 @@ cmp('combined', combined, 'combined.txt')
 
 out = combined @ cpw + cpb
 cmp('out', out, 'out.txt')
+
+outfn = attention(x, caw, cab, cpw, cpb)
+cmp('out_fn', outfn, 'outfn.txt')

@@ -1,5 +1,6 @@
 #include <iostream>
 #include "loader.h"
+#include "paths.h"
 
 int main() {
     auto w = load_weights("../gpt2-from-scratch/gpt2_weights.bin");

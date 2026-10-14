@@ -1,3 +1,5 @@
+import os
+BASE = os.environ.get('GPT2_CPP_DIR', '../gpt2-cpp-port/')
 import numpy as np
 from load_weights import load_weights
 from model import mlp
@@ -14,7 +16,7 @@ py = mlp(x,
          W['transformer.h.0.mlp.c_proj.weight'],
          W['transformer.h.0.mlp.c_proj.bias'])
 
-cpp = np.loadtxt('/home/rthacker/ai/gpt2-cpp-port/dbg_mlp.txt',
+cpp = np.loadtxt(BASE + 'dbg_mlp.txt',
                  dtype=np.float32).reshape(py.shape)
 d = np.abs(cpp - np.asarray(py, dtype=np.float32))
 print(f"mlp max diff {d.max():.8f}")

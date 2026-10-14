@@ -1,9 +1,10 @@
 #include <iostream>
 #include "tensor.h"
 #include "loader.h"
+#include "paths.h"
 
 int main() {
-    auto weights = load_weights("/home/rthacker/ai/gpt2-from-scratch/gpt2_weights.bin");
+    auto weights = load_weights(default_weights_path());
 
     for (auto& kv : weights) {
         if (kv.first.find("ln_f") != std::string::npos &&
