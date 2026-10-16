@@ -1,7 +1,7 @@
 #pragma once
 #include "tensor.h"
 
-Tensor matmul(Tensor& a, Tensor& b) {
+[[nodiscard]] Tensor matmul(Tensor& a, Tensor& b) {
     int M = a.shape[0], K = a.shape[1], N = b.shape[1];
     Tensor out({M, N});
     for (int i = 0; i < M; i++) {
@@ -16,7 +16,7 @@ Tensor matmul(Tensor& a, Tensor& b) {
     return out;
 }
 // add a bias vector to every row
-Tensor add_bias(Tensor& x, Tensor& bias) {
+[[nodiscard]] Tensor add_bias(Tensor& x, Tensor& bias) {
     Tensor out({x.shape[0], x.shape[1]});
     for (int i = 0; i < x.shape[0]; i++)
         for (int j = 0; j < x.shape[1]; j++)
@@ -25,7 +25,7 @@ Tensor add_bias(Tensor& x, Tensor& bias) {
 }
 
 // element-wise add (for residuals)
-Tensor add(Tensor& a, Tensor& b) {
+[[nodiscard]] Tensor add(Tensor& a, Tensor& b) {
     Tensor out({a.shape[0], a.shape[1]});
     for (int i = 0; i < a.size(); i++)
         out.data[i] = a.data[i] + b.data[i];
@@ -33,7 +33,7 @@ Tensor add(Tensor& a, Tensor& b) {
 }
 #include <cmath>
 
-Tensor gelu(Tensor& x) {
+[[nodiscard]] Tensor gelu(Tensor& x) {
     Tensor out = x;
     for (int i = 0; i < out.size(); i++) {
         float v = out.data[i];
@@ -41,7 +41,7 @@ Tensor gelu(Tensor& x) {
     }
     return out;
 }
-Tensor softmax(Tensor& x) {
+[[nodiscard]] Tensor softmax(Tensor& x) {
     int rows = x.shape[0], cols = x.shape[1];
     Tensor out({rows, cols});
     for (int i = 0; i < rows; i++) {
@@ -64,7 +64,7 @@ Tensor softmax(Tensor& x) {
     }
     return out;
 }
-Tensor layernorm(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
+[[nodiscard]] Tensor layernorm(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
     int rows = x.shape[0], cols = x.shape[1];
     Tensor out({rows, cols});
     for (int i = 0; i < rows; i++) {
@@ -85,7 +85,7 @@ Tensor layernorm(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
     }
     return out;
 }
-Tensor transpose(Tensor& x) {
+[[nodiscard]] Tensor transpose(Tensor& x) {
     int rows = x.shape[0], cols = x.shape[1];
     Tensor out({cols, rows});
     for (int i = 0; i < rows; i++)
@@ -95,7 +95,7 @@ Tensor transpose(Tensor& x) {
 }
 
 /*
-Tensor split_heads(Tensor& x, int n_heads = 12) {
+[[nodiscard]] Tensor split_heads(Tensor& x, int n_heads = 12) {
     int n = x.shape[0];
     int d_model = x.shape[1];
     int head_dim = d_model / n_heads;   // 768 / 12 = 64
@@ -113,7 +113,7 @@ Tensor split_heads(Tensor& x, int n_heads = 12) {
 }
 */
 
-Tensor split_heads(Tensor& x, int n_heads = 12) {
+[[nodiscard]] Tensor split_heads(Tensor& x, int n_heads = 12) {
     int n = x.shape[0];
     int d_model = x.shape[1];
     int head_dim = d_model / n_heads;
@@ -140,7 +140,7 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
         }
     }
 }
-Tensor attention_scores(Tensor& q, Tensor& k, int h) {
+[[nodiscard]] Tensor attention_scores(Tensor& q, Tensor& k, int h) {
     int n        = q.shape[1];   // sequence length
     int head_dim = q.shape[2];   // 64
 
@@ -159,7 +159,7 @@ Tensor attention_scores(Tensor& q, Tensor& k, int h) {
 
     return scores;
 }
-Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
+[[nodiscard]] Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
     int n        = weights.shape[0];
     int head_dim = v.shape[2];
 
@@ -177,7 +177,7 @@ Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
 
     return out;
 }
-Tensor combine_heads(Tensor& x) {
+[[nodiscard]] Tensor combine_heads(Tensor& x) {
     int n_heads  = x.shape[0];
     int n        = x.shape[1];
     int head_dim = x.shape[2];
@@ -191,7 +191,7 @@ Tensor combine_heads(Tensor& x) {
 
     return out;
 }
-Tensor attention(Tensor& x,
+[[nodiscard]] Tensor attention(Tensor& x,
                  Tensor& c_attn_w, Tensor& c_attn_b,
                  Tensor& c_proj_w, Tensor& c_proj_b,
                  int n_heads = 12) {
