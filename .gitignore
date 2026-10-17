@@ -7,3 +7,5 @@ crosscheck_*
 test_*
 !test_*.cpp
 *.bin
+bench_*
+!bench_*.cpp
