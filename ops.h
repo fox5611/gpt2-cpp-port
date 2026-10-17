@@ -1,20 +1,22 @@
 #pragma once
 #include "tensor.h"
 
+
 [[nodiscard]] Tensor matmul(Tensor& a, Tensor& b) {
     int M = a.shape[0], K = a.shape[1], N = b.shape[1];
     Tensor out({M, N});
     for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; k++) {
-                sum += a.at(i, k) * b.at(k, j);
-            }
-            out.at(i, j) = sum;
+        float* __restrict__ orow = &out.data[i * N];
+        for (int k = 0; k < K; k++) {
+            float aik = a.data[i * K + k];
+            const float* __restrict__ brow = &b.data[k * N];
+            for (int j = 0; j < N; j++) orow[j] += aik * brow[j];
         }
     }
     return out;
 }
+
+
 // add a bias vector to every row
 [[nodiscard]] Tensor add_bias(Tensor& x, Tensor& bias) {
     Tensor out({x.shape[0], x.shape[1]});

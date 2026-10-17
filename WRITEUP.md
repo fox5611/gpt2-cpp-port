@@ -44,7 +44,7 @@ Absolute thresholds are the wrong instrument. `mlp`'s absolute difference of 1.7
 
 ## What the language did
 
-In Python, most mistakes stop the program. The two C++ bugs that cost me the most time did the opposite: they compiled cleanly and produced plausible output, because nothing was wrong with the syntax. Meanwhile, the language objected loudly to things that cost me minutes.
+In Python, most mistakes stop the program. Two bugs account for nearly all the time I lost, and both did the opposite: they compiled cleanly and produced plausible output, because nothing was wrong with the syntax. Meanwhile, the language objected loudly to things that cost me minutes.
 
 Python's `x = x + a` rebinds a local name. In C++, `Tensor& x` is a reference to the caller's tensor, so `x = add(x, a)` overwrites their data instead. `transformer_block` uses `x1` and `x2` to avoid exactly that, and `generate` takes `token_ids` by value on purpose so it can append to its own copy.
 
@@ -60,16 +60,22 @@ The split is the point. C++ complained instantly about every mistake that was me
 
 ## Performance
 
-A 5-token forward pass takes 1.675 s, including the 475 MB weight load. Generating 10 tokens takes 23.5 s, about 2.35 s per token. Both compiled with `-O2` and run single-threaded on a Ryzen 5 5600.
+A 5-token forward pass takes 199 ms, and generating 10 tokens takes 4.1 s, compiled with `-O3 -march=native` and run single-threaded on a Ryzen 5 5600. Both figures are after the change described below; the first working version took 1156 ms and 23.5 s.
 
-The implementation is memory-bound rather than compute-bound because the roughly 7 million weights in each transformer block are each read from memory and used in exactly one multiply-add. The multiply-add itself is nearly free; the expensive part is moving the weights from memory to the processor, which cannot be done fast enough to keep it busy.
+At a sequence length of one, each of the roughly 7 million weights in a transformer block is read from memory and used in exactly one multiply-add, which is why the implementation is memory-bound rather than compute-bound. The multiply-add itself is nearly free; the expensive part is moving the weights from memory to the processor, which cannot be done fast enough to keep it busy.
 
-Imagine you had 7 million numbers and your job was to add 1 to each one and throw it away. That is what this implementation does at a sequence length of 1, so nearly all of the time goes into fetching the next number, and almost none into the addition.
+Imagine you had 7 million numbers and your job was to add 1 to each one and throw it away. That is what this implementation does, so nearly all of the time goes into fetching the next number, and almost none into the addition.
 
 Per-token cost grows as generation continues because of how `generate` calls `gpt2_forward`. The `for (int step = 0; step < n_new; step++)` loop appends each new token to `token_ids` and passes the whole vector back in, and `gpt2_forward` processes that entire sequence from the embeddings up through all 12 blocks. No state is kept between steps, so every previous token's keys and values are recomputed every time.
 
-Step 10 therefore does about 2.5× the work of step 1, and the total cost is quadratic in the number of tokens generated. That also means the 2.35 s/token figure is the average of a rising curve rather than a steady rate, and it only holds at these sequence lengths; it says nothing about generating 500 tokens.
+From a 5-token prompt, step 1 processes 5 tokens and step 10 processes 14, so step 10 does about 2.8× the work of step 1, and the total cost is quadratic in the number of tokens generated. That also means a per-token average is the average of a rising curve rather than a steady rate, and it only holds at these sequence lengths; it says nothing about generating 500 tokens.
 
-The first thing I would change is the memory layout of the weights. In `matmul`, `a.at(i,k)` walks contiguously but `b.at(k,j)` strides by the full row width, 2304 floats for `c_attn_w`, so one operand is read against the grain of how it's stored. Transposing the weight matrices once at load time, rather than inside `matmul`, would make both operands contiguous at no per-call cost.
+### Measuring one change
 
-I expect that to help before threading or SIMD would, because it fixes an access pattern that is simply wrong rather than adding parallelism on top of it. I haven't measured it yet, which is the next thing to do.
+With a 5-token prompt on a single-threaded Ryzen 5 5600, the forward pass originally took 1156 ms. Reordering `matmul`'s loops from `ijk` to `ikj` brought it to 314.5 ms at `-O2`, and compiling with `-O3 -march=native` brought it to 199.3 ms. Ten-token generation went from 23.5 s to 4.142 s. Correctness was unchanged at every step: 2.73e-06 relative against the Python implementation, and identical token IDs.
+
+The reorder is worth 3.67× on its own, from the access pattern alone. The second win is not what I expected. `-march=native` by itself does nothing, at 324.7 ms, marginally worse than plain `-O2`, while `-O3` alone is worth 1.45×, because `-O3` is what lets the cost model vectorize the inner loop at all. AVX2's wider registers then add 1.08× on top of that. Under `-O3` the loop vectorizes with 32-byte vectors; under `-O2` the cost model declines it. `__restrict__` and raw row pointers changed nothing, so aliasing was never the blocker, and switching from `at()` to raw indexing changed nothing either: the accessor was already being inlined away.
+
+That forces a correction to what I wrote above. At a sequence length of one, each weight is read once and used once, about 0.25 flops per byte, and the memory-bound argument holds. But every measurement here is at n = 5, where each weight is used five times, about 1.25 flops per byte, and `-O3` bought 1.45× purely by improving arithmetic throughput, which cannot happen if the processor is starved for data. The n=1 claim stands; these measurements don't test it, and at the sequence lengths I actually benchmarked, compute mattered. Two other things above are also wrong now: transposing the weights at load time is unnecessary, since the reorder achieves the same access pattern with no extra copy, and I was wrong to expect layout to matter before SIMD.
+
+The larger win is still untouched. A KV cache would make step n process one token instead of n, removing the quadratic term entirely, which is bigger than anything measured here. I did the layout fix first because it doesn't change what gets computed, only the order in which memory is traversed, so the existing cross-check validated it unchanged.

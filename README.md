@@ -95,3 +95,7 @@ Per generated token the twelve blocks are roughly 85M multiply-adds and the outp
 Deliberately out of scope: BPE tokenization, KV caching, temperature and top-k sampling, multithreading, SIMD, batching, and anything beyond the 124M configuration.
 
 The natural next step is a KV cache, which removes the quadratic recomputation. A verified reference implementation now exists to check it against, which is usually the hard part of optimization work.
+
+## Writeup
+
+WRITEUP.md covers what the port cost rather than what it is: the index arithmetic, how correctness was established, what each test was blind to, and why it runs at the speed it does.
