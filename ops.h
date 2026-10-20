@@ -385,6 +385,126 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
 
     return logits;
 }
+
+
+
+// Per-layer key/value caches for one generation run.
+// Per-layer key/value caches for one generation run.
+struct KVCache {
+    std::vector<Tensor> k;
+    std::vector<Tensor> v;
+    int n_used;
+
+    KVCache(int n_layers, int max_tokens, int d_model) : n_used(0) {
+        for (int i = 0; i < n_layers; i++) {
+            k.push_back(Tensor({max_tokens, d_model}));
+            v.push_back(Tensor({max_tokens, d_model}));
+        }
+    }
+};
+
+// One token through one transformer block, reading and extending the cache.
+[[nodiscard]] Tensor transformer_block_cached(
+        Tensor& x1, Tensor& ck, Tensor& cv, int n_past,
+        Tensor& ln_1_w, Tensor& ln_1_b,
+        Tensor& c_attn_w, Tensor& c_attn_b,
+        Tensor& c_proj_w, Tensor& c_proj_b,
+        Tensor& ln_2_w, Tensor& ln_2_b,
+        Tensor& c_fc_w, Tensor& c_fc_b,
+        Tensor& mlp_c_proj_w, Tensor& mlp_c_proj_b) {
+
+    Tensor n1 = layernorm(x1, ln_1_w, ln_1_b);
+    Tensor a  = attention_cached(n1, ck, cv, n_past,
+                                 c_attn_w, c_attn_b, c_proj_w, c_proj_b);
+    Tensor x2 = add(x1, a);
+
+    Tensor n2 = layernorm(x2, ln_2_w, ln_2_b);
+    Tensor m  = mlp(n2, c_fc_w, c_fc_b, mlp_c_proj_w, mlp_c_proj_b);
+    Tensor x3 = add(x2, m);
+
+    return x3;
+}
+
+// One token in, one row of logits out. The token's absolute position is taken
+// from cache.n_used -- that value indexes wpe, and getting it wrong is the
+// classic cache bug: attention stays correct while the position embedding lies.
+// want_logits=false skips the output head and returns a {0, vocab} tensor; the
+// head is 154 MB of wte per call and prefill discards all but the last one.
+[[nodiscard]] Tensor gpt2_forward_step(int token_id, KVCache& cache,
+                                       std::map<std::string, Tensor>& W,
+                                       int n_layers = 12,
+                                       bool want_logits = true) {
+    Tensor& wte = W.at("transformer.wte.weight");
+    Tensor& wpe = W.at("transformer.wpe.weight");
+
+    int d_model  = wte.shape[1];
+    int vocab    = wte.shape[0];
+    int position = cache.n_used;
+
+    Tensor x({1, d_model});
+    for (int j = 0; j < d_model; j++)
+        x.at(0, j) = wte.at(token_id, j) + wpe.at(position, j);
+
+    for (int i = 0; i < n_layers; i++) {
+        std::string p = "transformer.h." + std::to_string(i) + ".";
+        x = transformer_block_cached(x, cache.k[i], cache.v[i], position,
+            W.at(p + "ln_1.weight"),        W.at(p + "ln_1.bias"),
+            W.at(p + "attn.c_attn.weight"), W.at(p + "attn.c_attn.bias"),
+            W.at(p + "attn.c_proj.weight"), W.at(p + "attn.c_proj.bias"),
+            W.at(p + "ln_2.weight"),        W.at(p + "ln_2.bias"),
+            W.at(p + "mlp.c_fc.weight"),    W.at(p + "mlp.c_fc.bias"),
+            W.at(p + "mlp.c_proj.weight"),  W.at(p + "mlp.c_proj.bias"));
+    }
+
+    cache.n_used = position + 1;
+
+    if (!want_logits) return Tensor({0, vocab});
+
+    Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
+                             W.at("transformer.ln_f.bias"));
+
+    Tensor logits({1, vocab});
+    for (int vq = 0; vq < vocab; vq++) {
+        float s = 0.0f;
+        for (int j = 0; j < d_model; j++)
+            s += xf.at(0, j) * wte.at(vq, j);
+        logits.at(0, vq) = s;
+    }
+    return logits;
+}
+
+[[nodiscard]] std::vector<int> generate_cached(std::vector<int> token_ids,
+                                               std::map<std::string, Tensor>& W,
+                                               int n_new,
+                                               int n_layers = 12) {
+    if (token_ids.empty() || n_new <= 0) return token_ids;
+
+    Tensor& wte    = W.at("transformer.wte.weight");
+    int d_model    = wte.shape[1];
+    int max_tokens = (int)token_ids.size() + n_new;
+
+    KVCache cache(n_layers, max_tokens, d_model);
+
+    // prefill: only the final token's logits are used
+    Tensor logits;
+    for (size_t t = 0; t < token_ids.size(); t++) {
+        bool last = (t + 1 == token_ids.size());
+        logits = gpt2_forward_step(token_ids[t], cache, W, n_layers, last);
+    }
+
+    for (int step = 0; step < n_new; step++) {
+        int best = 0;
+        for (int v = 1; v < logits.shape[1]; v++)
+            if (logits.at(0, v) > logits.at(0, best)) best = v;
+
+        token_ids.push_back(best);
+
+        if (step + 1 < n_new)
+            logits = gpt2_forward_step(best, cache, W, n_layers, true);
+    }
+    return token_ids;
+}
+
 [[nodiscard]] std::vector<int> generate(std::vector<int> token_ids,
                                         std::map<std::string, Tensor>& W,
                                         int n_new) {
