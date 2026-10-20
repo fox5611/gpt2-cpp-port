@@ -1,6 +1,7 @@
 #pragma once
+#include <map>
+#include <string>
 #include "tensor.h"
-
 
 [[nodiscard]] Tensor matmul(Tensor& a, Tensor& b) {
     int M = a.shape[0], K = a.shape[1], N = b.shape[1];
@@ -233,6 +234,79 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
     Tensor out  = add_bias(proj, c_proj_b);
     return out;
 }
+
+
+// One decode step's attention for a single new token.
+// ck / cv are this layer's key and value caches, allocated ({max_tokens, 768}).
+// n_past is how many of their rows are already valid; this token's K and V are
+// written at row n_past, so n_past + 1 rows are valid on return.
+//
+// The caches hold K and V in the same (rows x 768) layout the uncached path
+// uses before split_heads, so head h lives in columns [h*head_dim, (h+1)*head_dim)
+// and no head-splitting copy is needed.
+[[nodiscard]] Tensor attention_cached(Tensor& x1,
+                                      Tensor& ck, Tensor& cv, int n_past,
+                                      Tensor& c_attn_w, Tensor& c_attn_b,
+                                      Tensor& c_proj_w, Tensor& c_proj_b,
+                                      int n_heads = 12) {
+    int d_model  = x1.shape[1];
+    int head_dim = d_model / n_heads;
+    int n        = n_past + 1;            // valid cache rows after the append
+
+    // 1. QKV projection, one row only
+    Tensor qkv_raw = matmul(x1, c_attn_w);
+    Tensor qkv     = add_bias(qkv_raw, c_attn_b);
+
+    Tensor q({1, d_model}), k({1, d_model}), v({1, d_model});
+    split_qkv(qkv, q, k, v);
+
+    // 2. append this token's K and V
+    for (int j = 0; j < d_model; j++) {
+        ck.at(n_past, j) = k.at(0, j);
+        cv.at(n_past, j) = v.at(0, j);
+    }
+
+    // 3. one query row against every cached key. No causal mask is needed:
+    //    every row in the cache is at a position <= this one.
+    Tensor combined({1, d_model});
+    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    std::vector<float> w(n);
+
+    for (int h = 0; h < n_heads; h++) {
+        int base = h * head_dim;
+
+        for (int j = 0; j < n; j++) {
+            float dot = 0.0f;
+            for (int d = 0; d < head_dim; d++)
+                dot += q.at(0, base + d) * ck.at(j, base + d);
+            w[j] = dot * scale;
+        }
+
+        float max_val = w[0];
+        for (int j = 1; j < n; j++)
+            if (w[j] > max_val) max_val = w[j];
+
+        float sum = 0.0f;
+        for (int j = 0; j < n; j++) {
+            w[j] = std::exp(w[j] - max_val);
+            sum += w[j];
+        }
+        for (int j = 0; j < n; j++) w[j] = w[j] / sum;
+
+        for (int d = 0; d < head_dim; d++) {
+            float acc = 0.0f;
+            for (int j = 0; j < n; j++)
+                acc += w[j] * cv.at(j, base + d);
+            combined.at(0, base + d) = acc;
+        }
+    }
+
+    // 4. output projection
+    Tensor proj = matmul(combined, c_proj_w);
+    Tensor out  = add_bias(proj, c_proj_b);
+    return out;
+}
+
 
 [[nodiscard]] Tensor mlp(Tensor& x,
                          Tensor& c_fc_w, Tensor& c_fc_b,
