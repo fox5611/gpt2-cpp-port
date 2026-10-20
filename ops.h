@@ -266,7 +266,8 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
 }
 [[nodiscard]] Tensor gpt2_forward(std::vector<int>& token_ids,
                                   std::map<std::string, Tensor>& W,
-                                  int n_layers = 12) {
+                                  int n_layers = 12,
+                                  bool last_row_only = false) {
     Tensor& wte = W.at("transformer.wte.weight");   // (50257, 768)
     Tensor& wpe = W.at("transformer.wpe.weight");   // (1024, 768)
 
@@ -294,14 +295,18 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
     Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
                              W.at("transformer.ln_f.bias"));
 
-    // tied output head: logits = xf @ wte.T, no transpose materialized
-    Tensor logits({n, vocab});
-    for (int t = 0; t < n; t++)
+    // tied output head: logits = xf @ wte.T, no transpose materialized.
+    // generate() only ever reads the final row, so last_row_only skips the rest.
+    int t_begin = last_row_only ? n - 1 : 0;
+    int rows    = n - t_begin;
+
+    Tensor logits({rows, vocab});
+    for (int t = t_begin; t < n; t++)
         for (int vq = 0; vq < vocab; vq++) {
             float s = 0.0f;
             for (int j = 0; j < d_model; j++)
                 s += xf.at(t, j) * wte.at(vq, j);
-            logits.at(t, vq) = s;
+            logits.at(t - t_begin, vq) = s;
         }
 
     return logits;
@@ -310,9 +315,9 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
                                         std::map<std::string, Tensor>& W,
                                         int n_new) {
     for (int step = 0; step < n_new; step++) {
-        Tensor logits = gpt2_forward(token_ids, W);
+        Tensor logits = gpt2_forward(token_ids, W, 12, /*last_row_only=*/true);
 
-        int last = (int)token_ids.size() - 1;
+        int last = logits.shape[0] - 1;   // 0 under last_row_only; still correct without it
         int best = 0;
         for (int v = 1; v < logits.shape[1]; v++)
             if (logits.at(last, v) > logits.at(last, best)) best = v;
