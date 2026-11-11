@@ -472,7 +472,121 @@ struct KVCache {
     }
     return logits;
 }
+// ---- batched prefill -------------------------------------------------------
+// attention() with one addition: the K and V rows for positions 0..n-1 are
+// written into the cache so the decode path can read them afterwards. The maths
+// is untouched; attention_scores() already applies the causal mask, so a row at
+// position i sees only 0..i exactly as the one-at-a-time path did.
+// Valid only on an empty cache: the writes are to absolute rows 0..n-1.
+[[nodiscard]] Tensor attention_prefill(Tensor& x,
+                 Tensor& ck, Tensor& cv,
+                 Tensor& c_attn_w, Tensor& c_attn_b,
+                 Tensor& c_proj_w, Tensor& c_proj_b,
+                 int n_heads = 12) {
+    int n        = x.shape[0];
+    int d_model  = x.shape[1];
+    int head_dim = d_model / n_heads;
 
+    Tensor qkv_raw = matmul(x, c_attn_w);
+    Tensor qkv     = add_bias(qkv_raw, c_attn_b);
+
+    Tensor q({n, d_model}), k({n, d_model}), v({n, d_model});
+    split_qkv(qkv, q, k, v);
+
+    // cache is (max_tokens, 768), which is exactly k's and v's layout here
+    for (int t = 0; t < n; t++)
+        for (int j = 0; j < d_model; j++) {
+            ck.at(t, j) = k.at(t, j);
+            cv.at(t, j) = v.at(t, j);
+        }
+
+    Tensor qh = split_heads(q, n_heads);
+    Tensor kh = split_heads(k, n_heads);
+    Tensor vh = split_heads(v, n_heads);
+
+    Tensor heads({n_heads, n, head_dim});
+    for (int h = 0; h < n_heads; h++) {
+        Tensor scores  = attention_scores(qh, kh, h);
+        Tensor weights = softmax(scores);
+        Tensor out_h   = attention_gather(weights, vh, h);
+
+        for (int i = 0; i < n; i++)
+            for (int d = 0; d < head_dim; d++)
+                heads.at(h, i, d) = out_h.at(i, d);
+    }
+
+    Tensor combined = combine_heads(heads);
+    Tensor proj = matmul(combined, c_proj_w);
+    Tensor out  = add_bias(proj, c_proj_b);
+    return out;
+}
+
+[[nodiscard]] Tensor transformer_block_prefill(
+        Tensor& x, Tensor& ck, Tensor& cv,
+        Tensor& ln_1_w, Tensor& ln_1_b,
+        Tensor& c_attn_w, Tensor& c_attn_b,
+        Tensor& c_proj_w, Tensor& c_proj_b,
+        Tensor& ln_2_w, Tensor& ln_2_b,
+        Tensor& c_fc_w, Tensor& c_fc_b,
+        Tensor& mlp_c_proj_w, Tensor& mlp_c_proj_b) {
+
+    Tensor n1 = layernorm(x, ln_1_w, ln_1_b);
+    Tensor a  = attention_prefill(n1, ck, cv,
+                                  c_attn_w, c_attn_b, c_proj_w, c_proj_b);
+    Tensor x1 = add(x, a);
+
+    Tensor n2 = layernorm(x1, ln_2_w, ln_2_b);
+    Tensor m  = mlp(n2, c_fc_w, c_fc_b, mlp_c_proj_w, mlp_c_proj_b);
+    Tensor x2 = add(x1, m);
+
+    return x2;
+}
+
+// The whole prompt in one pass, filling the cache for every position, returning
+// only the final row's logits since that is all generate_cached() reads.
+// Requires cache.n_used == 0 on entry.
+[[nodiscard]] Tensor gpt2_forward_prefill(std::vector<int>& token_ids,
+                                          KVCache& cache,
+                                          std::map<std::string, Tensor>& W,
+                                          int n_layers = 12) {
+    Tensor& wte = W.at("transformer.wte.weight");
+    Tensor& wpe = W.at("transformer.wpe.weight");
+
+    int n       = (int)token_ids.size();
+    int d_model = wte.shape[1];
+    int vocab   = wte.shape[0];
+
+    Tensor x({n, d_model});
+    for (int t = 0; t < n; t++)
+        for (int j = 0; j < d_model; j++)
+            x.at(t, j) = wte.at(token_ids[t], j) + wpe.at(t, j);
+
+    for (int i = 0; i < n_layers; i++) {
+        std::string p = "transformer.h." + std::to_string(i) + ".";
+        x = transformer_block_prefill(x, cache.k[i], cache.v[i],
+            W.at(p + "ln_1.weight"),        W.at(p + "ln_1.bias"),
+            W.at(p + "attn.c_attn.weight"), W.at(p + "attn.c_attn.bias"),
+            W.at(p + "attn.c_proj.weight"), W.at(p + "attn.c_proj.bias"),
+            W.at(p + "ln_2.weight"),        W.at(p + "ln_2.bias"),
+            W.at(p + "mlp.c_fc.weight"),    W.at(p + "mlp.c_fc.bias"),
+            W.at(p + "mlp.c_proj.weight"),  W.at(p + "mlp.c_proj.bias"));
+    }
+
+    cache.n_used = n;
+
+    Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
+                             W.at("transformer.ln_f.bias"));
+
+    Tensor logits({1, vocab});
+    for (int vq = 0; vq < vocab; vq++) {
+        float s = 0.0f;
+        for (int j = 0; j < d_model; j++)
+            s += xf.at(n - 1, j) * wte.at(vq, j);
+        logits.at(0, vq) = s;
+    }
+
+    return logits;
+}
 [[nodiscard]] std::vector<int> generate_cached(std::vector<int> token_ids,
                                                std::map<std::string, Tensor>& W,
                                                int n_new,
@@ -485,12 +599,8 @@ struct KVCache {
 
     KVCache cache(n_layers, max_tokens, d_model);
 
-    // prefill: only the final token's logits are used
-    Tensor logits;
-    for (size_t t = 0; t < token_ids.size(); t++) {
-        bool last = (t + 1 == token_ids.size());
-        logits = gpt2_forward_step(token_ids[t], cache, W, n_layers, last);
-    }
+    // prefill: whole prompt in one pass, only the final row's logits are used
+    Tensor logits = gpt2_forward_prefill(token_ids, cache, W, n_layers);
 
     for (int step = 0; step < n_new; step++) {
         int best = 0;
