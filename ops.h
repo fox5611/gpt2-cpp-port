@@ -149,18 +149,20 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
 
     Tensor scores({n, n});
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
+        for (int j = 0; j <= i; j++) {
             float dot = 0.0f;
             for (int d = 0; d < head_dim; d++) {
                 dot += q.at(h, i, d) * k.at(h, j, d);
             }
-            scores.at(i, j) = (j > i) ? -1e9f : dot * scale;
+            scores.at(i, j) = dot * scale;
+        }
+        for (int j = i + 1; j < n; j++) {
+            scores.at(i, j) = -1e9f;
         }
     }
 
-    return scores;
+	return scores;
 }
 [[nodiscard]] Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
     int n        = weights.shape[0];
@@ -168,13 +170,17 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
 
     Tensor out({n, head_dim});
 
+    // ikj order: the inner loop walks d, which is contiguous in both v and out.
+    // Entries with j > i have weight exactly 0 after the -1e9 mask, so skipping
+    // them changes nothing and halves the work.
     for (int i = 0; i < n; i++) {
-        for (int d = 0; d < head_dim; d++) {
-            float sum = 0.0f;
-            for (int j = 0; j < n; j++) {
-                sum += weights.at(i, j) * v.at(h, j, d);
-            }
-            out.at(i, d) = sum;
+        for (int d = 0; d < head_dim; d++)
+            out.at(i, d) = 0.0f;
+
+        for (int j = 0; j <= i && j < n; j++) {
+            float w = weights.at(i, j);
+            for (int d = 0; d < head_dim; d++)
+                out.at(i, d) += w * v.at(h, j, d);
         }
     }
 
