@@ -248,27 +248,39 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
         }
     }
 }
+// scores[i][j] = sum_d q[i][d] * k[j][d] is Q times K-transposed, so it is a
+// matmul and belongs in the tiled kernel. The scalar version summed 64 terms
+// into one accumulator, a dependency chain about four cycles per link, which is
+// why it managed 3.6 GFLOPS. k is transposed to (head_dim, n) so the tiled
+// kernel can walk j contiguously. That computes the full n x n rather than the
+// lower triangle, which is twice the arithmetic at roughly thirty times the rate.
 [[nodiscard]] Tensor attention_scores(Tensor& q, Tensor& k, int h) {
     int n        = q.shape[1];   // sequence length
     int head_dim = q.shape[2];   // 64
 
-    Tensor scores({n, n});
+    // head h of q is already contiguous as (n, head_dim)
+    Tensor qh({n, head_dim});
+    __builtin_memcpy(qh.data.data(),
+                     q.data.data() + (size_t)h * n * head_dim,
+                     (size_t)n * head_dim * sizeof(float));
+
+    Tensor kt({head_dim, n});
+    for (int j = 0; j < n; j++)
+        for (int d = 0; d < head_dim; d++)
+            kt.at(d, j) = k.at(h, j, d);
+
+    Tensor scores = matmul(qh, kt);   // (n, n)
+
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j <= i; j++) {
-            float dot = 0.0f;
-            for (int d = 0; d < head_dim; d++) {
-                dot += q.at(h, i, d) * k.at(h, j, d);
-            }
-            scores.at(i, j) = dot * scale;
-        }
-        for (int j = i + 1; j < n; j++) {
-            scores.at(i, j) = -1e9f;
-        }
+        float* __restrict__ row = &scores.data[(size_t)i * n];
+        for (int j = 0; j <= i; j++)     row[j] *= scale;
+        for (int j = i + 1; j < n; j++)  row[j] = -1e9f;
     }
 
-	return scores;
+    return scores;
 }
+
 [[nodiscard]] Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
     int n        = weights.shape[0];
     int head_dim = v.shape[2];
