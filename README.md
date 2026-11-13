@@ -86,15 +86,19 @@ The Python scripts import from the Python repo's `model.py`, so they must run fr
 
 ## Performance
 
-The 5-token forward pass takes 1.675 seconds, including the 475 MB weight load. Ten greedy tokens take 23.5 seconds, about 2.35 s/token. That's `-O2`, single-threaded, on a Ryzen 5 5600.
+Prefill on a 256-token prompt takes 483 ms, about 1.9 ms per prompt token. Ten greedy tokens from a 5-token prompt take 516 ms, about 47 ms per generated token. Both exclude the weight load. That's `-O3 -march=native` on a Ryzen 5 5600, with the matmul threaded across six cores.
 
-Per generated token the twelve blocks are roughly 85M multiply-adds and the output head another 38M. At a sequence length of 1 each weight is read once and used once, which gives about 0.25 flops per byte: memory-bound. There is also no KV cache, so every step recomputes the whole sequence.
+The first working version took 23.5 seconds for those same ten tokens. The gap is an `ikj` loop reorder, a KV cache, batched prefill, two attention kernel fixes, a register-tiled AVX2 matmul, and threading it. The matmul reaches 500 GFLOPS across six cores against a measured single-core peak of 110. WRITEUP.md has the measurements, and the three optimizations that failed before the one that worked.
+
+Per generated token the twelve blocks are roughly 85M multiply-adds and the output head another 38M. At a sequence length of 1 each weight is read once and used once, which gives about 0.25 flops per byte, so decode is memory-bound. Prefill is not: processing the whole prompt in one pass reuses each weight across every position, and it is limited by arithmetic throughput instead.
 
 ## Not implemented
 
-Deliberately out of scope: BPE tokenization, KV caching, temperature and top-k sampling, multithreading, SIMD, batching, and anything beyond the 124M configuration.
+Deliberately out of scope: BPE tokenization, temperature and top-k sampling, batched inference across multiple sequences, and anything beyond the 124M configuration.
 
-The natural next step is a KV cache, which removes the quadratic recomputation. A verified reference implementation now exists to check it against, which is usually the hard part of optimization work.
+Implemented since this was first written: KV caching, batched prefill, SIMD through GCC vector extensions, and multithreading in the matmul. The elementwise kernels and softmax are still scalar and single-threaded, and are now the largest remaining cost in a forward pass.
+
+Every optimization is checked against the verified reference implementation, which is usually the hard part of this kind of work. The cross-checks compare both the final logits and the full KV cache contents, because logits can agree while a cache is subtly wrong.
 
 ## Writeup
 
