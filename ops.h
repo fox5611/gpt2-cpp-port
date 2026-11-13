@@ -2,6 +2,8 @@
 #include <map>
 #include <string>
 #include <algorithm>
+#include <thread>
+#include <cstdlib>
 #include "tensor.h"
 
 // Unblocked ikj, kept for A/B comparison.
@@ -39,11 +41,12 @@ static inline v8f v8f_set1(float x) {
     return (v8f){x, x, x, x, x, x, x, x};
 }
 
-// 4x16 register-tiled matmul with a packed b panel. Eight accumulators held in
-// registers for the whole k sweep, so the inner loop issues zero stores: two
-// loads of b, four broadcasts of a, eight FMAs. The previous version let GCC
-// manage an acc[4][16] array and it emitted eight stack stores per eight FMAs,
-// which pinned the loop at one FMA per cycle on a one-store-per-cycle port.
+// 4x16 register-tiled matmul with a packed b panel, parallel over column
+// blocks. Eight accumulators stay in YMM registers for the whole k sweep, so
+// the inner loop issues two loads of b, four broadcasts of a, eight FMAs and
+// zero stores. Each worker owns its own bpack and writes a disjoint range of
+// columns, so there are no locks; the only sharing is a cache line at each
+// worker boundary. GPT2_THREADS overrides the thread count for sweeps.
 [[nodiscard]] Tensor matmul(Tensor& a, Tensor& b) {
     int M = a.shape[0], K = a.shape[1], N = b.shape[1];
     Tensor out({M, N});
@@ -51,68 +54,104 @@ static inline v8f v8f_set1(float x) {
     constexpr int MR = 4;
     constexpr int NR = 16;
 
-    // Fewer rows than one tile cannot amortise the packing, which costs a whole
-    // extra pass over b to serve a single row. Decode calls this with M = 1.
+    // One row cannot fill a tile and the packing costs a whole extra pass over
+    // b to serve it. Decode calls this with M = 1.
     if (M < MR) return matmul_simple(a, b);
 
-    std::vector<float> bpack((size_t)K * NR);
+    const int n_jblocks = N / NR;
 
-    for (int j0 = 0; j0 + NR <= N; j0 += NR) {
-        for (int k = 0; k < K; k++) {
-            const float* __restrict__ src = &b.data[(size_t)k * N + j0];
-            float* __restrict__ dst = &bpack[(size_t)k * NR];
-            for (int jj = 0; jj < NR; jj++) dst[jj] = src[jj];
-        }
+    auto worker = [&](int jb_begin, int jb_end) {
+        std::vector<float> bpack((size_t)K * NR);
 
-        int i0 = 0;
-        for (; i0 + MR <= M; i0 += MR) {
-            v8f c00 = v8f_set1(0.0f), c01 = v8f_set1(0.0f);
-            v8f c10 = v8f_set1(0.0f), c11 = v8f_set1(0.0f);
-            v8f c20 = v8f_set1(0.0f), c21 = v8f_set1(0.0f);
-            v8f c30 = v8f_set1(0.0f), c31 = v8f_set1(0.0f);
-
-            const float* ap0 = &a.data[(size_t)(i0 + 0) * K];
-            const float* ap1 = &a.data[(size_t)(i0 + 1) * K];
-            const float* ap2 = &a.data[(size_t)(i0 + 2) * K];
-            const float* ap3 = &a.data[(size_t)(i0 + 3) * K];
+        for (int jb = jb_begin; jb < jb_end; jb++) {
+            const int j0 = jb * NR;
 
             for (int k = 0; k < K; k++) {
-                const float* bk = &bpack[(size_t)k * NR];
-                v8f b0 = v8f_load(bk);
-                v8f b1 = v8f_load(bk + 8);
-
-                v8f a0 = v8f_set1(ap0[k]);
-                v8f a1 = v8f_set1(ap1[k]);
-                v8f a2 = v8f_set1(ap2[k]);
-                v8f a3 = v8f_set1(ap3[k]);
-
-                c00 += a0 * b0;  c01 += a0 * b1;
-                c10 += a1 * b0;  c11 += a1 * b1;
-                c20 += a2 * b0;  c21 += a2 * b1;
-                c30 += a3 * b0;  c31 += a3 * b1;
+                const float* __restrict__ src = &b.data[(size_t)k * N + j0];
+                float* __restrict__ dst = &bpack[(size_t)k * NR];
+                for (int jj = 0; jj < NR; jj++) dst[jj] = src[jj];
             }
 
-            float* o0 = &out.data[(size_t)(i0 + 0) * N + j0];
-            float* o1 = &out.data[(size_t)(i0 + 1) * N + j0];
-            float* o2 = &out.data[(size_t)(i0 + 2) * N + j0];
-            float* o3 = &out.data[(size_t)(i0 + 3) * N + j0];
-            v8f_store(o0, c00);  v8f_store(o0 + 8, c01);
-            v8f_store(o1, c10);  v8f_store(o1 + 8, c11);
-            v8f_store(o2, c20);  v8f_store(o2 + 8, c21);
-            v8f_store(o3, c30);  v8f_store(o3 + 8, c31);
-        }
+            int i0 = 0;
+            for (; i0 + MR <= M; i0 += MR) {
+                v8f c00 = v8f_set1(0.0f), c01 = v8f_set1(0.0f);
+                v8f c10 = v8f_set1(0.0f), c11 = v8f_set1(0.0f);
+                v8f c20 = v8f_set1(0.0f), c21 = v8f_set1(0.0f);
+                v8f c30 = v8f_set1(0.0f), c31 = v8f_set1(0.0f);
 
-        for (; i0 < M; i0++) {
-            float* __restrict__ orow = &out.data[(size_t)i0 * N + j0];
-            for (int k = 0; k < K; k++) {
-                float aik = a.data[(size_t)i0 * K + k];
-                const float* __restrict__ brow = &bpack[(size_t)k * NR];
-                for (int jj = 0; jj < NR; jj++) orow[jj] += aik * brow[jj];
+                const float* ap0 = &a.data[(size_t)(i0 + 0) * K];
+                const float* ap1 = &a.data[(size_t)(i0 + 1) * K];
+                const float* ap2 = &a.data[(size_t)(i0 + 2) * K];
+                const float* ap3 = &a.data[(size_t)(i0 + 3) * K];
+
+                for (int k = 0; k < K; k++) {
+                    const float* bk = &bpack[(size_t)k * NR];
+                    v8f b0 = v8f_load(bk);
+                    v8f b1 = v8f_load(bk + 8);
+
+                    v8f a0 = v8f_set1(ap0[k]);
+                    v8f a1 = v8f_set1(ap1[k]);
+                    v8f a2 = v8f_set1(ap2[k]);
+                    v8f a3 = v8f_set1(ap3[k]);
+
+                    c00 += a0 * b0;  c01 += a0 * b1;
+                    c10 += a1 * b0;  c11 += a1 * b1;
+                    c20 += a2 * b0;  c21 += a2 * b1;
+                    c30 += a3 * b0;  c31 += a3 * b1;
+                }
+
+                float* o0 = &out.data[(size_t)(i0 + 0) * N + j0];
+                float* o1 = &out.data[(size_t)(i0 + 1) * N + j0];
+                float* o2 = &out.data[(size_t)(i0 + 2) * N + j0];
+                float* o3 = &out.data[(size_t)(i0 + 3) * N + j0];
+                v8f_store(o0, c00);  v8f_store(o0 + 8, c01);
+                v8f_store(o1, c10);  v8f_store(o1 + 8, c11);
+                v8f_store(o2, c20);  v8f_store(o2 + 8, c21);
+                v8f_store(o3, c30);  v8f_store(o3 + 8, c31);
+            }
+
+            for (; i0 < M; i0++) {
+                float* __restrict__ orow = &out.data[(size_t)i0 * N + j0];
+                for (int k = 0; k < K; k++) {
+                    float aik = a.data[(size_t)i0 * K + k];
+                    const float* __restrict__ brow = &bpack[(size_t)k * NR];
+                    for (int jj = 0; jj < NR; jj++) orow[jj] += aik * brow[jj];
+                }
             }
         }
+    };
+
+    int nthreads = 1;
+    if ((double)M * K * N >= 16e6) {
+        // 6 and 12 tie on this kernel since SMT siblings share the FMA units,
+        // so prefer the lower count and spawn half as many threads.
+        unsigned hw = std::thread::hardware_concurrency();
+        nthreads = hw ? (int)std::max(1u, hw / 2) : 1;
+    }
+    if (const char* e = getenv("GPT2_THREADS")) {
+        int v = atoi(e);
+        if (v > 0) nthreads = v;
+    }
+    if (nthreads > n_jblocks) nthreads = n_jblocks;
+    if (nthreads < 1) nthreads = 1;
+
+    if (nthreads == 1) {
+        worker(0, n_jblocks);
+    } else {
+        const int per = (n_jblocks + nthreads - 1) / nthreads;
+        std::vector<std::thread> pool;
+        pool.reserve(nthreads - 1);
+        for (int t = 1; t < nthreads; t++) {
+            int b0 = t * per;
+            int b1 = std::min(b0 + per, n_jblocks);
+            if (b0 >= b1) break;
+            pool.emplace_back(worker, b0, b1);
+        }
+        worker(0, std::min(per, n_jblocks));
+        for (auto& th : pool) th.join();
     }
 
-    for (int j_done = (N / NR) * NR, i = 0; j_done < N && i < M; i++) {
+    for (int j_done = n_jblocks * NR, i = 0; j_done < N && i < M; i++) {
         float* __restrict__ orow = &out.data[(size_t)i * N];
         for (int k = 0; k < K; k++) {
             float aik = a.data[(size_t)i * K + k];
