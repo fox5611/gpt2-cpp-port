@@ -179,12 +179,72 @@ static inline v8f v8f_set1(float x) {
     return out;
 }
 #include <cmath>
+#include <immintrin.h>
 
-[[nodiscard]] Tensor gelu(Tensor& x) {
+// reference implementation, kept for testing
+[[nodiscard]] Tensor gelu_scalar(Tensor& x) {
     Tensor out = x;
     for (int i = 0; i < out.size(); i++) {
         float v = out.data[i];
         out.data[i] = 0.5f * v * (1.0f + std::tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
+    }
+    return out;
+}
+
+// exp(x) on eight floats, Cephes expf polynomial, about 1 ulp
+static inline __m256 exp8(__m256 x) {
+    // clamp so the biased exponent built below stays in [1, 254]; beyond this
+    // range exp(x) is subnormal-or-zero at one end and near FLT_MAX at the other
+    x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.0f)),
+                                       _mm256_set1_ps( 88.0f));
+
+    // n = round(x * log2(e)), f = x - n*ln2, so exp(x) = exp(f) * 2^n
+    __m256 n = _mm256_round_ps(_mm256_mul_ps(x, _mm256_set1_ps(1.44269504f)),
+                               _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m256 f = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693147181f), x);
+
+    __m256 p = _mm256_set1_ps(1.9875691500e-4f);
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(1.3981999507e-3f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(8.3334519073e-3f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(4.1665795894e-2f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(1.6666665459e-1f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(5.0000001201e-1f));
+    p = _mm256_fmadd_ps(p, _mm256_mul_ps(f, f), f);
+    p = _mm256_add_ps(p, _mm256_set1_ps(1.0f));
+
+    __m256i e = _mm256_slli_epi32(
+                    _mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23);
+    return _mm256_mul_ps(p, _mm256_castsi256_ps(e));
+}
+
+[[nodiscard]] Tensor gelu(Tensor& x) {
+    // GPT2_GELU_SCALAR=1 selects the scalar reference, for A/B measurement
+    static const bool use_scalar = getenv("GPT2_GELU_SCALAR") != nullptr;
+    if (use_scalar) {
+        return gelu_scalar(x);
+    }
+
+    Tensor out({x.shape[0], x.shape[1]});
+    const int n = x.size();
+    const float * xp = x.data.data();
+    float * op = out.data.data();
+
+    // GELU(v) = v / (1 + exp(-2c(v + 0.044715 v^3))), c = 0.7978845608
+    const __m256 mc2 = _mm256_set1_ps(-1.59576912f);
+    const __m256 k   = _mm256_set1_ps(0.044715f);
+    const __m256 one = _mm256_set1_ps(1.0f);
+
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 v  = _mm256_loadu_ps(xp + i);
+        __m256 v3 = _mm256_mul_ps(_mm256_mul_ps(v, v), v);
+        __m256 u  = _mm256_mul_ps(mc2, _mm256_fmadd_ps(k, v3, v));
+        __m256 r  = _mm256_div_ps(v, _mm256_add_ps(one, exp8(u)));
+        _mm256_storeu_ps(op + i, r);
+    }
+    for (; i < n; i++) {
+        float v = xp[i];
+        op[i] = 0.5f * v * (1.0f + std::tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
     }
     return out;
 }
