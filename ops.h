@@ -248,7 +248,8 @@ static inline __m256 exp8(__m256 x) {
     }
     return out;
 }
-[[nodiscard]] Tensor softmax(Tensor& x) {
+// reference implementation, kept for testing
+[[nodiscard]] Tensor softmax_scalar(Tensor& x) {
     int rows = x.shape[0], cols = x.shape[1];
     Tensor out({rows, cols});
     for (int i = 0; i < rows; i++) {
@@ -268,6 +269,73 @@ static inline __m256 exp8(__m256 x) {
         // pass 3: divide
         for (int j = 0; j < cols; j++)
             out.at(i, j) = out.at(i, j) / sum;
+    }
+    return out;
+}
+
+[[nodiscard]] Tensor softmax(Tensor& x) {
+    // GPT2_SOFTMAX_SCALAR=1 selects the scalar reference, for A/B measurement
+    static const bool use_scalar = getenv("GPT2_SOFTMAX_SCALAR") != nullptr;
+    if (use_scalar) {
+        return softmax_scalar(x);
+    }
+
+    int rows = x.shape[0], cols = x.shape[1];
+    Tensor out({rows, cols});
+
+    for (int i = 0; i < rows; i++) {
+        const float * xr   = x.data.data()   + (size_t) i * cols;
+        float       * orow = out.data.data() + (size_t) i * cols;
+
+        // pass 1: row max
+        float max_val = xr[0];
+        int j = 0;
+        if (cols >= 8) {
+            __m256 m = _mm256_loadu_ps(xr);
+            for (j = 8; j + 8 <= cols; j += 8) {
+                m = _mm256_max_ps(m, _mm256_loadu_ps(xr + j));
+            }
+            float t[8];
+            _mm256_storeu_ps(t, m);
+            for (int k = 0; k < 8; k++) {
+                if (t[k] > max_val) max_val = t[k];
+            }
+        }
+        for (; j < cols; j++) {
+            if (xr[j] > max_val) max_val = xr[j];
+        }
+
+        // pass 2: exp(x - max) into out, accumulating the sum
+        const __m256 mv = _mm256_set1_ps(max_val);
+        __m256 acc = _mm256_setzero_ps();
+        float sum = 0.0f;
+        j = 0;
+        for (; j + 8 <= cols; j += 8) {
+            __m256 e = exp8(_mm256_sub_ps(_mm256_loadu_ps(xr + j), mv));
+            _mm256_storeu_ps(orow + j, e);
+            acc = _mm256_add_ps(acc, e);
+        }
+        {
+            float t[8];
+            _mm256_storeu_ps(t, acc);
+            sum = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+        }
+        for (; j < cols; j++) {
+            float e = std::exp(xr[j] - max_val);
+            orow[j] = e;
+            sum += e;
+        }
+
+        // pass 3: scale by the reciprocal
+        const float inv = 1.0f / sum;
+        const __m256 invv = _mm256_set1_ps(inv);
+        j = 0;
+        for (; j + 8 <= cols; j += 8) {
+            _mm256_storeu_ps(orow + j, _mm256_mul_ps(_mm256_loadu_ps(orow + j), invv));
+        }
+        for (; j < cols; j++) {
+            orow[j] *= inv;
+        }
     }
     return out;
 }
