@@ -248,6 +248,76 @@ static inline __m256 exp8(__m256 x) {
     }
     return out;
 }
+
+// reference implementation, kept for testing
+[[nodiscard]] Tensor logits_last_row_scalar(Tensor& xf, Tensor& wte, int n, int d_model, int vocab) {
+    Tensor logits({1, vocab});
+    for (int vq = 0; vq < vocab; vq++) {
+        float s = 0.0f;
+        for (int j = 0; j < d_model; j++)
+            s += xf.at(n - 1, j) * wte.at(vq, j);
+        logits.at(0, vq) = s;
+    }
+    return logits;
+}
+
+// logits[vq] = dot(wte[vq], xf[n-1]), vectorised and threaded over the vocabulary
+[[nodiscard]] Tensor logits_last_row(Tensor& xf, Tensor& wte, int n, int d_model, int vocab) {
+    static const bool use_scalar = getenv("GPT2_LOGITS_SCALAR") != nullptr;
+    if (use_scalar) {
+        return logits_last_row_scalar(xf, wte, n, d_model, vocab);
+    }
+
+    Tensor logits({1, vocab});
+    const float * xrow = xf.data.data() + (size_t) (n - 1) * d_model;
+    const float * wp   = wte.data.data();
+    float       * lp   = logits.data.data();
+
+    auto worker = [&](int v0, int v1) {
+        for (int vq = v0; vq < v1; vq++) {
+            const float * w = wp + (size_t) vq * d_model;
+            __m256 a0 = _mm256_setzero_ps();
+            __m256 a1 = _mm256_setzero_ps();
+            int j = 0;
+            for (; j + 16 <= d_model; j += 16) {
+                a0 = _mm256_fmadd_ps(_mm256_loadu_ps(w + j),     _mm256_loadu_ps(xrow + j),     a0);
+                a1 = _mm256_fmadd_ps(_mm256_loadu_ps(w + j + 8), _mm256_loadu_ps(xrow + j + 8), a1);
+            }
+            __m256 a = _mm256_add_ps(a0, a1);
+            for (; j + 8 <= d_model; j += 8) {
+                a = _mm256_fmadd_ps(_mm256_loadu_ps(w + j), _mm256_loadu_ps(xrow + j), a);
+            }
+            float t[8];
+            _mm256_storeu_ps(t, a);
+            float s = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+            for (; j < d_model; j++) {
+                s += w[j] * xrow[j];
+            }
+            lp[vq] = s;
+        }
+    };
+
+    const char * e = getenv("GPT2_THREADS");
+    int hw = (int) std::thread::hardware_concurrency();
+    int nthreads = e ? atoi(e) : (hw > 1 ? hw / 2 : 1);
+    if (nthreads < 1) nthreads = 1;
+
+    if (nthreads == 1 || vocab < 1024) {
+        worker(0, vocab);
+    } else {
+        std::vector<std::thread> pool;
+        int chunk = (vocab + nthreads - 1) / nthreads;
+        for (int t = 0; t < nthreads; t++) {
+            int v0 = t * chunk;
+            int v1 = (v0 + chunk < vocab) ? v0 + chunk : vocab;
+            if (v0 >= v1) break;
+            pool.emplace_back(worker, v0, v1);
+        }
+        for (std::thread & th : pool) th.join();
+    }
+
+    return logits;
+}
 // reference implementation, kept for testing
 [[nodiscard]] Tensor softmax_scalar(Tensor& x) {
     int rows = x.shape[0], cols = x.shape[1];
@@ -753,14 +823,7 @@ struct KVCache {
     Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
                              W.at("transformer.ln_f.bias"));
 
-    Tensor logits({1, vocab});
-    for (int vq = 0; vq < vocab; vq++) {
-        float s = 0.0f;
-        for (int j = 0; j < d_model; j++)
-            s += xf.at(0, j) * wte.at(vq, j);
-        logits.at(0, vq) = s;
-    }
-    return logits;
+    return logits_last_row(xf, wte, 1, d_model, vocab);
 }
 // ---- batched prefill -------------------------------------------------------
 // attention() with one addition: the K and V rows for positions 0..n-1 are
@@ -867,13 +930,7 @@ struct KVCache {
     Tensor xf = layernorm(x, W.at("transformer.ln_f.weight"),
                              W.at("transformer.ln_f.bias"));
 
-    Tensor logits({1, vocab});
-    for (int vq = 0; vq < vocab; vq++) {
-        float s = 0.0f;
-        for (int j = 0; j < d_model; j++)
-            s += xf.at(n - 1, j) * wte.at(vq, j);
-        logits.at(0, vq) = s;
-    }
+    Tensor logits = logits_last_row(xf, wte, n, d_model, vocab);
 
     return logits;
 }
