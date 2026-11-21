@@ -735,13 +735,13 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
     int rows    = n - t_begin;
 
     Tensor logits({rows, vocab});
-    for (int t = t_begin; t < n; t++)
+    for (int t = t_begin; t < n; t++) {
+        // logits_last_row computes row (arg - 1), so pass t + 1 to get row t
+        Tensor row = logits_last_row(xf, wte, t + 1, d_model, vocab);
         for (int vq = 0; vq < vocab; vq++) {
-            float s = 0.0f;
-            for (int j = 0; j < d_model; j++)
-                s += xf.at(t, j) * wte.at(vq, j);
-            logits.at(t - t_begin, vq) = s;
+            logits.at(t - t_begin, vq) = row.data[vq];
         }
+    }
 
     return logits;
 }
