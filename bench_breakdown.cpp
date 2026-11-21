@@ -79,7 +79,7 @@ int main() {
 
     std::cout << "  matmuls    " << mm   << " ms/block, x12 = " << mm * 12   << " ms\n";
     std::cout << "  attention  " << attn << " ms/block, x12 = " << attn * 12 << " ms\n";
-    std::cout << "  full prefill at n=256 measured  2292 ms\n\n";
+    std::cout << "  (full prefill total: run ./bench_prefill)\n\n";
 
     const double mm_flop   = 2.0 * n * (768.0*2304 + 768.0*768 + 768.0*3072 + 3072.0*768);
     const double attn_flop = 2.0 * n_heads * 2.0 * n * n * head_dim * 0.5;

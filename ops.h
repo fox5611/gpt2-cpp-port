@@ -409,7 +409,8 @@ static inline __m256 exp8(__m256 x) {
     }
     return out;
 }
-[[nodiscard]] Tensor layernorm(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
+// reference implementation, kept for testing
+[[nodiscard]] Tensor layernorm_scalar(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
     int rows = x.shape[0], cols = x.shape[1];
     Tensor out({rows, cols});
     for (int i = 0; i < rows; i++) {
@@ -427,6 +428,84 @@ static inline __m256 exp8(__m256 x) {
         float inv = 1.0f / std::sqrt(var + eps);
         for (int j = 0; j < cols; j++)
             out.at(i, j) = (x.at(i, j) - mean) * inv * weight.data[j] + bias.data[j];
+    }
+    return out;
+}
+
+[[nodiscard]] Tensor layernorm(Tensor& x, Tensor& weight, Tensor& bias, float eps = 1e-5f) {
+    // GPT2_LAYERNORM_SCALAR=1 selects the scalar reference, for A/B measurement
+    static const bool use_scalar = getenv("GPT2_LAYERNORM_SCALAR") != nullptr;
+    if (use_scalar) {
+        return layernorm_scalar(x, weight, bias, eps);
+    }
+
+    int rows = x.shape[0], cols = x.shape[1];
+    Tensor out({rows, cols});
+    const float * wp = weight.data.data();
+    const float * bp = bias.data.data();
+    float t[8];
+
+    for (int i = 0; i < rows; i++) {
+        const float * xr   = x.data.data()   + (size_t) i * cols;
+        float       * orow = out.data.data() + (size_t) i * cols;
+
+        // pass 1: mean
+        __m256 s0 = _mm256_setzero_ps();
+        __m256 s1 = _mm256_setzero_ps();
+        int j = 0;
+        for (; j + 16 <= cols; j += 16) {
+            s0 = _mm256_add_ps(s0, _mm256_loadu_ps(xr + j));
+            s1 = _mm256_add_ps(s1, _mm256_loadu_ps(xr + j + 8));
+        }
+        __m256 sv = _mm256_add_ps(s0, s1);
+        for (; j + 8 <= cols; j += 8) {
+            sv = _mm256_add_ps(sv, _mm256_loadu_ps(xr + j));
+        }
+        _mm256_storeu_ps(t, sv);
+        float sum = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+        for (; j < cols; j++) {
+            sum += xr[j];
+        }
+        float mean = sum / (float) cols;
+
+        // pass 2: variance
+        const __m256 mv = _mm256_set1_ps(mean);
+        __m256 v0 = _mm256_setzero_ps();
+        __m256 v1 = _mm256_setzero_ps();
+        j = 0;
+        for (; j + 16 <= cols; j += 16) {
+            __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(xr + j),     mv);
+            __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(xr + j + 8), mv);
+            v0 = _mm256_fmadd_ps(d0, d0, v0);
+            v1 = _mm256_fmadd_ps(d1, d1, v1);
+        }
+        __m256 vv = _mm256_add_ps(v0, v1);
+        for (; j + 8 <= cols; j += 8) {
+            __m256 d = _mm256_sub_ps(_mm256_loadu_ps(xr + j), mv);
+            vv = _mm256_fmadd_ps(d, d, vv);
+        }
+        _mm256_storeu_ps(t, vv);
+        float var = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+        for (; j < cols; j++) {
+            float d = xr[j] - mean;
+            var += d * d;
+        }
+        var /= (float) cols;
+
+        // pass 3: normalise, scale, shift
+        const float inv = 1.0f / std::sqrt(var + eps);
+        const __m256 invv = _mm256_set1_ps(inv);
+        j = 0;
+        for (; j + 8 <= cols; j += 8) {
+            __m256 d = _mm256_sub_ps(_mm256_loadu_ps(xr + j), mv);
+            __m256 r = _mm256_fmadd_ps(_mm256_mul_ps(d, invv),
+                                       _mm256_loadu_ps(wp + j),
+                                       _mm256_loadu_ps(bp + j));
+            _mm256_storeu_ps(orow + j, r);
+        }
+        for (; j < cols; j++) {
+            orow[j] = (xr[j] - mean) * inv * wp[j] + bp[j];
+        }
     }
     return out;
 }
