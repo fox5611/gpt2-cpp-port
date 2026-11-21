@@ -597,7 +597,8 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
     return scores;
 }
 
-[[nodiscard]] Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
+// reference implementation, kept for testing
+[[nodiscard]] Tensor attention_gather_scalar(Tensor& weights, Tensor& v, int h) {
     int n        = weights.shape[0];
     int head_dim = v.shape[2];
 
@@ -615,6 +616,68 @@ void split_qkv(Tensor& qkv, Tensor& q, Tensor& k, Tensor& v) {
             for (int d = 0; d < head_dim; d++)
                 out.at(i, d) += w * v.at(h, j, d);
         }
+    }
+
+    return out;
+}
+
+// head_dim == 64 is exactly 8 AVX vectors, so the whole output row lives in 8
+// YMM registers for the duration of the j loop. No load-modify-store per
+// element, and eight independent FMA chains so none of them stalls on its own
+// latency. Other head_dim values fall back to the scalar reference.
+[[nodiscard]] Tensor attention_gather(Tensor& weights, Tensor& v, int h) {
+    static const bool use_scalar = getenv("GPT2_GATHER_SCALAR") != nullptr;
+
+    int n        = weights.shape[0];
+    int head_dim = v.shape[2];
+
+    if (use_scalar || head_dim != 64) {
+        return attention_gather_scalar(weights, v, h);
+    }
+
+    const int wstride = weights.shape[1];
+    const int nv      = v.shape[1];
+
+    Tensor out({n, 64});
+    const float * wd = weights.data.data();
+    const float * vd = v.data.data() + (size_t) h * nv * 64;
+    float       * od = out.data.data();
+
+    for (int i = 0; i < n; i++) {
+        __m256 a0 = _mm256_setzero_ps();
+        __m256 a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps();
+        __m256 a3 = _mm256_setzero_ps();
+        __m256 a4 = _mm256_setzero_ps();
+        __m256 a5 = _mm256_setzero_ps();
+        __m256 a6 = _mm256_setzero_ps();
+        __m256 a7 = _mm256_setzero_ps();
+
+        const float * wr   = wd + (size_t) i * wstride;
+        const int     jmax = (i + 1 < n) ? i + 1 : n;
+
+        for (int j = 0; j < jmax; j++) {
+            const __m256  wv = _mm256_set1_ps(wr[j]);
+            const float * vp = vd + (size_t) j * 64;
+            a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp +  0), a0);
+            a1 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp +  8), a1);
+            a2 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 16), a2);
+            a3 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 24), a3);
+            a4 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 32), a4);
+            a5 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 40), a5);
+            a6 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 48), a6);
+            a7 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vp + 56), a7);
+        }
+
+        float * orow = od + (size_t) i * 64;
+        _mm256_storeu_ps(orow +  0, a0);
+        _mm256_storeu_ps(orow +  8, a1);
+        _mm256_storeu_ps(orow + 16, a2);
+        _mm256_storeu_ps(orow + 24, a3);
+        _mm256_storeu_ps(orow + 32, a4);
+        _mm256_storeu_ps(orow + 40, a5);
+        _mm256_storeu_ps(orow + 48, a6);
+        _mm256_storeu_ps(orow + 56, a7);
     }
 
     return out;
