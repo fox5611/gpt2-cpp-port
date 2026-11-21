@@ -70,7 +70,7 @@ int main() {
                      + t_gelu + 2.0 * t_add + (double) n_heads * t_sm;
 
     printf("\n  per block %8.3f ms, x%d = %8.3f ms\n", per_block, n_blocks, per_block * n_blocks);
-    printf("  measured prefill total 381 ms, matmuls 98, attention 112\n");
+    printf("  (totals: run ./bench_prefill and ./bench_breakdown)\n");
     printf("  sink %g\n", (float) sink);
     return 0;
 }
